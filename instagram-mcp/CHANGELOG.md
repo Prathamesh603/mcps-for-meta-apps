@@ -1,0 +1,456 @@
+# Changelog
+
+All notable changes to this project are documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [0.8.0] — 2026-10-13
+
+### Added
+
+- `--help`/`-h` print usage and exit 0; an unknown subcommand or flag exits 2
+  instead of starting the stdio server (0.7.0 treated every argument as a start).
+- `scripts/build-mcpb.sh` builds a lean MCPB bundle (~3 MB) from the npm tarball
+  contents plus production dependencies.
+- `scripts/live-qa.mjs` and `docs/live-qa.md`: one-command live verification of
+  T-E1–T-E4 and the open `[verify]` probes, read-only unless `--write` is confirmed.
+- `server.json` declares `IG_AUTH_MODE`, `IG_WRITE_MODE` and `IG_TOOL_PACKAGES`.
+- List, media, comment and insights results report what was left out
+  (`omittedWithoutId`, `omittedValues`, `repliesTruncated`, `paging.truncated`)
+  instead of dropping it silently.
+- `discover_business`: new `mediaAfter` input and `mediaPaging` output. The
+  nested media edge now reports `truncated: true` with an `after` cursor when
+  Instagram returned one; pass it back as `mediaAfter` (sent as
+  `media.after(<cursor>)`) to read the next page of the profile's media
+  (CC-DATA-116).
+- Composite publish previews (`post_image`, `post_reel`, `post_story`) now show
+  `details.caption.excerpt` (flattened, cut after 200 code points with `…`) and
+  `details.media_hosts` (the distinct hosts Instagram will fetch from; never the
+  path, query or userinfo) (CC-PUB-60).
+- A resume (`resumeContainerId`) that also receives media inputs now warns, in the
+  preview and the applied result, that those inputs are ignored and names them
+  (CC-PUB-59).
+- `token_status` and `doctor` report an `expiring_soon` state (a `doctor` WARN)
+  when the Path B data-access window closes within 7 days.
+
+- `instagram_list_stories`: a read-only tool (package `media`) that lists the
+  account's live stories from `GET /{ig-user-id}/stories`. It is paged like
+  `instagram_list_media`, captions are fenced, and it covers only Instagram's
+  24-hour window. The tool count goes from 28 to 29 (CC-DATA-119).
+- `manifest.json` (MCPB) now declares a `tools` array — every tool of the `all`
+  surface with its first-sentence summary — so Claude Desktop's Extensions detail
+  pane lists the tools. It is generated from the registry by `npm run gen:manifest`
+  and locked by a drift gate in `test/release/mcpb-manifest.test.ts`.
+- The MCPB bundle has been built (`scripts/build-mcpb.sh`, 3.4 MB) and smoke-tested
+  locally: the unzipped bundle starts as `manifest.json` launches it and lists its
+  tools over stdio without any network call.
+
+### Changed
+
+- **Breaking for clients that parsed it:** an error result no longer carries
+  `structuredContent.error`. SDK clients validated that envelope against the
+  tool's output schema and turned every typed error into `-32602`; the typed
+  error is now the text line `Instagram error (<kind>): <message> (code N,
+  subcode M)`.
+- An unresolved MCPB placeholder (`${user_config.X}`) in an `IG_*` variable is
+  treated as unset.
+- The MCPB manifest pins `IG_AUTH_MODE` (default `ig-login`), so filling both app
+  fields no longer switches a Path-A token to `fb-login`.
+- The recorded token expiry is bound to a fingerprint of the token it was written
+  for; a record for a different token is ignored.
+- The Claude Code plugin moved to `plugins/instagram-mcp-ai/` and the marketplace
+  entry now reads `"source": "./plugins/instagram-mcp-ai"`. With `"source": "./"`
+  Claude Code copied the whole repo into its plugin cache and ran `npm ci` on the
+  root `package.json`, about 88 MB of dev dependencies per install. The plugin
+  directory holds no `package.json`, so the cached copy is a few kilobytes.
+  `/plugin marketplace add IvanBBaev/instagram-mcp` is unchanged.
+- Migrated to MCP TypeScript SDK v2 (`npx @modelcontextprotocol/codemod v1-to-v2`
+  plus hand fixes). Runtime dependencies: `@modelcontextprotocol/sdk` 1.x is
+  replaced by `@modelcontextprotocol/server` and `@modelcontextprotocol/node`
+  (the Node HTTP adapter for Streamable HTTP), and `zod` goes from 3 to 4. The
+  tool names, profiles, arguments and output fields are unchanged. **User-visible**
+  in the published `tools/list` schemas: `$schema` is now JSON Schema draft
+  2020-12 (was draft-07); integer fields with no declared bound advertise the
+  safe-integer range as `minimum`/`maximum`; open (passthrough) objects publish
+  `additionalProperties: {}` instead of `true`; record-shaped fields add
+  `propertyNames: {"type": "string"}`; the recursive comment shape is published
+  once under `$defs` and referenced by `$ref`; and the `userTags` item object no
+  longer advertises `additionalProperties: false` (unknown keys in a tag were,
+  and still are, dropped rather than rejected). Input-validation messages now use
+  zod 4's wording (e.g. `Invalid input: expected string, received number`).
+- A bare `IG_TOKEN_EXPIRES_AT` record (`<seconds>` with no token fingerprint) is
+  still read, but `token_status` and `doctor` now report it as unverified in every
+  dated state, `valid` and `never` included, instead of presenting it as a fact
+  about the current token (CC-AUTH-70).
+- The Path A expiry note now reads "This is the expiry `login`/`refresh` recorded
+  in … for this token."
+- A JSON text block now has key-name masking too: an `access_token` value that
+  was masked only in `structuredContent` is now `[REDACTED]` in the text as well
+  (CC-DATA-104).
+- `summarizeDataAccessExpiry` in `src/api/account.ts` is the one place that reads
+  `data_access_expires_at`, and both `token_status` and `doctor` use it, so the two
+  diagnostics cannot disagree (CC-AUTH-77).
+- README lists the `--app-id` / `--app-secret` login options; `docs/auth.md` §2 links the setup guide instead of a "future README".
+
+- A still-image URL field (feed image, story image, reel cover) whose URL ends in
+  a video extension now draws its own warning ("suggests a video, but this field
+  takes a still image") instead of the non-JPEG one (CC-PUB-23).
+- `instagram_post_image`, `instagram_post_reel` and `instagram_post_story` return
+  their warnings as `warnings` on every applied result (`published`,
+  `already_published`, `in_progress`), not only in the preview (CC-PUB-25).
+- A relative config directory now resolves against the config home, not the
+  process working directory (CC-CFG-11).
+- The untrusted-text renderer blanks invisible renderers in its visible-text view
+  (CC-DATA-126), and a fenced block defangs near-miss delimiters to `⟦…⟧` instead
+  of the old `[ /UNTRUSTED]` rewrite (CC-DATA-125).
+- The error-text token stripper and the secret redactor now share one set of
+  token-shape backstops (`src/core/token-shapes.ts`) (CC-PROC-19).
+
+- `instagram_set_comments_enabled` belongs to the `comments` package instead of
+  `media`, so package allow, deny and read-only selection treat it as a comments
+  tool (CC-PROC-9).
+- `instagram_discover_business` publishes `id` as required. A profile-less answer,
+  or a profile without a usable id, is now an `upstream` error instead of a
+  note-only or id-less result (CC-DATA-32, supersedes CC-DATA-79).
+- The `mediaAfter` description states that a cursor taken from a different
+  username is not detected (CC-DATA-133).
+
+### Removed
+
+- The unused `text()` result builder in `src/mcp/result.ts`; every tool result is
+  JSON (CC-DATA-114).
+- The unused `needsRefresh` helper in `core/refresh.ts`; refresh stays
+  operator-driven (CC-AUTH-67).
+
+### Fixed
+
+- Redaction of the `login` failure line, stray expiry records, and missing
+  `quota_usage` no longer read as 0 — see `docs/corner-cases.md` audit waves 5–7.
+- A single-page listing (`list_media`, `list_stories`, `list_comments`,
+  `list_tagged_media`, `get_hashtag_media`) that Instagram answers with the same
+  cursor it was sent now reports `truncated: true` with the same-cursor note the
+  `fetchAll` walk uses, instead of offering that cursor as the next page and
+  inviting an endless re-read of one page (CC-DATA-134).
+- `instagram_get_account_insights` with `metric_type: "time_series"` now defaults to
+  `reach`, the only account metric Instagram serves as a time series, and refuses
+  any other metric with it before a call; a bare `time_series` used to request all
+  eleven metrics and always fail (CC-INS-25).
+- `instagram_get_account_insights` now refuses a `since` after `until` instead of
+  forwarding the inverted window (CC-INS-26).
+- `instagram_get_audience_demographics` now sends `period=lifetime`, which Meta
+  marks required (CC-INS-27).
+- `login` no longer waits forever on a token endpoint that accepts the connection
+  and never answers: each OAuth exchange now has the same 30 s timeout as
+  `refresh` (CC-AUTH-72).
+- `login` no longer follows a redirect from a token endpoint. A 307/308 on the
+  Instagram code exchange used to re-send the app secret and the authorization
+  code to the redirect target; like `refresh`, it now fails instead
+  (CC-AUTH-73).
+- A `Retry-After` value that is neither delta-seconds nor an IMF-fixdate (`1.5`,
+  `-1`, `+5`, `60,`) now falls back to exponential backoff. V8 read these as
+  dates in 2001 or 1960, so the retry fired with no delay (CC-RATE-17).
+- A media URL (`imageUrls`, `imageUrl`, `videoUrl`, `coverUrl`) containing a
+  control character is refused as not a well-formed https URL. The parser silently
+  dropped a trailing newline or a tab/LF inside the host, so the URL was judged
+  valid while the raw string, sent to Graph unchanged, named a different host
+  (CC-PUB-57).
+- `IG_PRETTY_JSON=true` now pretty-prints the text block of every tool, and of the
+  write gate's preview and refusal results; 25 of the 28 tools used to ignore it
+  (CC-DATA-30, CC-DATA-112).
+- `token_status` no longer reports a Path B `data_access_expires_at` of `0` as a
+  data-access window that closed in 1970; `dataAccessExpiresAt` is absent, as when
+  Meta omits the field (CC-DATA-113).
+- `login` and `refresh` record the expiry when Meta quotes `expires_in` as a
+  canonical non-negative integer string; any other string still leaves no record
+  (CC-AUTH-69).
+- A Path B `debug_token` `expires_at` outside the recorded range (milliseconds,
+  negative, fractional, past year 9999) reads as unknown, as Path A already did,
+  instead of a token valid until year 58692 (CC-AUTH-68).
+- A blank or relative `HOME` / `USERPROFILE` is refused, naming the variable,
+  instead of putting `~/…` and the default config home under the cwd
+  (`HOME="   "` wrote `<cwd>/   /instagram-mcp-ai/.env`) (CC-CFG-69).
+- **Behaviour change:** a relative `IG_ENV_FILE` now stops the server at
+  start-up, as `login` / `refresh` already refused it; it used to be read
+  relative to the MCP client's cwd (CC-CFG-70).
+- An unexpanded `${user_config.X}` template written as a value inside an env
+  file reads as unset, as it already did in the client's environment (CC-CFG-71).
+- A symlinked store is resolved again under the write lock, and a link re-pointed
+  in between refuses the write (CC-CFG-72); every link in a chain is
+  owner-checked, not only the first (CC-CFG-73).
+- Every directory on the way to the credentials store — plain, symlinked, or
+  the one a link leads to — must be owned by you or by root; one owned by another
+  user refuses the write. A `..` in a link target is climbed from where a
+  directory link led, as the kernel does, instead of being cancelled as text
+  (CC-CFG-74). **Behaviour change:** an `IG_ENV_FILE` inside another user's
+  directory is now refused.
+- A blank or relative `HOME` / `USERPROFILE` is refused for the default write
+  journal too, instead of putting the audit trail under the cwd; the default is
+  resolved when read, so importing the settings never fails on it (CC-CFG-75).
+- `login` / `refresh` write an `IG_ENV_FILE` with a `..` after a symlinked
+  directory to the file the server loads, not to a lexically normalized one
+  (CC-CFG-76).
+- A Path B `debug_token` `data_access_expires_at` outside the recorded range reads
+  as unknown with a warning, as `expires_at` already did, instead of a far-future
+  data-access date (CC-AUTH-71).
+- A `fetchAll` media or comment listing that hits an expired token, a missing
+  permission, a rate limit or a Meta outage after the first page now reports that
+  error. It used to return the pages read so far with a "cursor may be stale —
+  restart the listing" note. Only an invalid cursor still keeps the partial
+  result (CC-DATA-105).
+- `instagram_discover_business` answered with a JSON `null` body now returns the
+  "no profile" note instead of an internal `TypeError` (CC-DATA-106).
+- An own `__proto__` key in a tool result's JSON body is kept, with its value
+  redacted, instead of silently vanishing from the result (CC-DATA-107).
+- `list_media`, `list_comments`, `list_tagged_media`, `list_linked_accounts` and
+  `get_hashtag_media` now read the end of a listing from a missing `paging.next`,
+  as Graph documents, instead of from a missing `paging.cursors.after`, which Graph
+  still sends on the last page. The last page no longer hands back a resume
+  `after`, a `fetchAll` whose cap lands exactly on the final page boundary is no
+  longer reported `truncated`, and `fetchAll` no longer spends one extra request
+  past the end. A page with `paging.next` and no cursor resumes from the `after`
+  in that URL (CC-DATA-115).
+- `login`: a token exchange that times out or fails in transport (connection
+  refused, DNS, a refused redirect) now rejects as a typed `InstagramError`
+  (kind `upstream`, original error on `cause`), like every other exchange
+  failure and like `refresh`; the printed `login failed:` line is unchanged
+  (CC-AUTH-74).
+- `login`: an exchange answering with a whitespace-only `access_token` is
+  refused at that exchange with "did not include an access_token", instead of
+  being sent on beside the app secret and failing later with a misleading
+  persist error (CC-AUTH-75).
+
+
+- A media URL whose scheme is not followed by exactly `//` (`https:/cdn/a.jpg`,
+  `https:cdn/a.jpg`, `https:///cdn/a.jpg`), or that has a backslash before its query,
+  is now refused as not a well-formed `https://` URL. The URL parser silently
+  repaired these shapes to `https://cdn/…` for the check, while the raw string was
+  what Graph received (CC-PUB-58).
+
+- `discover_business` no longer drops the nested media edge's paging, which
+  made a capped media list look like the account's complete output. A cursor
+  that cannot be sent back is reported as `truncated: true` with the
+  unusable-cursor note, never as the end (CC-DATA-116).
+- `reply_to_comment` and `create_comment` now refuse a whitespace-only
+  `message` before any call, as CC-COM-6 always stated. Previously only an
+  empty string was refused, so `"   "` reached Graph as a public write. A
+  message with real text is still posted exactly as written, untrimmed
+  (CC-COM-18).
+- `get_comment` no longer fails the whole read with MCP error -32602 when the
+  nested `media` context carries a `media_type` or `permalink` of the wrong
+  type (`null`, a number). The mistyped field is dropped, as it already was on
+  the comment itself (CC-COM-19).
+
+
+- `doctor` now reports the Path B data-access window (`data_access_expires_at`), which
+  closes independently of the token. It prints `OK` while the window is open, `WARN`
+  once it has closed, and `INFO unknown` for a value that is not an instant. It prints
+  nothing when Meta reports no window or `0`. Before this, a valid token with a closed
+  window showed only OK token lines (CC-AUTH-77).
+- `instagram_token_status` now adds a warning when the data-access window has already
+  closed, next to any token-expiry warning. Before this, it published the past date
+  with no warning, so a token whose data reads all fail looked healthy (CC-AUTH-77).
+- The wire-value renderer used by the timestamp guards and `doctor` no longer throws on a value that cannot be turned into a string at all (a circular object with no prototype, a revoked proxy); it renders `[unrenderable]` instead, as its "never throws" contract promises. (CC-DATA-128)
+
+- `instagram_list_media` no longer claims to list stories. Instagram's media edge never returns story media (they live on a separate stories edge), so the description now lists feed posts, reels and albums, says stories are not included, and drops the "counts on stories" wording; `docs/tools.md` and the README tools table follow. (CC-DATA-118)
+
+- `server.json` described `IG_ACCOUNT_ID` as skipping a lookup and disambiguating between reachable accounts; no lookup exists. It now matches `manifest.json`: optional with an Instagram-Login token (calls address `me`), required with a Facebook-Login token.
+- `docs/plugin-install.md` and the README Setup paragraph claimed the npm package blocker was fully cleared; the plugin manifest pins `instagram-mcp-ai@0.8.0`, which is not published yet (npm has 0.7.0), so the docs now say the launcher resolves only once the pinned version is published.
+- `docs/architecture.md` said 429 is retried on any method; only idempotent calls (GET by default) are retried, and POST/DELETE is never replayed, matching `core/http.ts` and operations.md.
+- `docs/index.html` listed the `core` profile as 24 tools (it is 25), omitted the `after` / `mediaAfter` cursor parameters of `list_linked_accounts`, `get_hashtag_media` and `discover_business`, understated the delete gate (`apply: true` or `IG_WRITE_MODE=apply`, plus `IG_ALLOW_DESTRUCTIVE=true`), and described `IG_ENV_FILE` and env loading inaccurately.
+- `docs/troubleshooting.md` quoted a paraphrase of the auth-path refusal; it now quotes the real message shape (`Tool '…' is not available on the '…' auth path`).
+
+- Every URL field in the published input schemas now carries its own description,
+  instead of a shared `$ref` that JSON Schema draft-07 hid it behind (CC-PUB-35),
+  and a `pattern` (`^ *[Hh][Tt][Tt][Pp][Ss]:\/\/`) that matches the server's own
+  message (CC-PUB-36).
+
+- `instagram_get_media` no longer fails a whole album read when the `/children`
+  fallback fails; it returns the detail with a note naming the error kind
+  (CC-DATA-120).
+- `instagram_create_comment` and `instagram_reply_to_comment` refuse a message made
+  only of zero-width or invisible characters (CC-COM-20).
+- The start-up refusal for an unreadable `IG_ENV_FILE`, and the refusal for a
+  relative one, now quote the path with every line break and invisible character
+  escaped, so a file name can no longer split the refusal into a forged stderr line
+  (CC-CFG-79).
+- A single string sent to a list argument (`post_image.imageUrls`,
+  `create_media_container.children`, or `metrics` on the three insights tools)
+  is again refused with the type error alone. Since the zod 4 upgrade, the refusal
+  also carried a misleading `Too big: expected string to have <=10 characters`
+  (or `>=1 characters`). Item-count limits on real lists and the published
+  `minItems` / `maxItems` are unchanged (CC-PUB-67).
+- `login` with an `http:` redirect URI that names no port (or names `:80`, which
+  the URL parser drops) now listens on port 80, where the browser is sent. It used
+  to listen on 8723, so the redirect never arrived and the login waited until
+  the five-minute timeout (CC-CFG-82).
+
+### Security
+
+- The production dependency tree is clear of audit advisories again.
+  `@modelcontextprotocol/sdk` goes from `^1.30.0` (1.30.0) to `^1.32.1`
+  (GHSA-6qxp-vccf-f47h, high: the SDK's OAuth *client* could send credentials to
+  an authorization server chosen by the MCP server), and the lockfile refresh
+  moves its transitive `proxy-addr` 2.0.7 → 2.0.8 (GHSA-jqcg-44mw-7w3h, critical),
+  `fast-uri` 3.1.7 → 3.1.8 (GHSA-hrr3-gc8f-f4qj, moderate) and `ip-address`
+  10.4.0 → 10.7.3 (four moderate classifier advisories); no `overrides` entry was
+  needed. None was reachable here: this package is an MCP server and never loads
+  the SDK's OAuth client; its HTTP transport is `node:http` plus the SDK's
+  `StreamableHTTPServerTransport`, so the SDK's express app and auth router —
+  the only code that loads `express` (with `proxy-addr`) and `express-rate-limit`
+  (with `ip-address`) — are never imported, and `src/` sets no `trust proxy` and
+  classifies no IP address with a library. `fast-uri` is loaded, through the
+  SDK's ajv validator, but only resolves the server's own schema ids.
+- A Path-B (Facebook Login) call that is retried after a 429/5xx, or that waits for
+  a concurrency slot, is now signed again when it is sent. Before, every attempt
+  reused the `appsecret_time` and `appsecret_proof` minted for the first one, up to
+  minutes stale, which widened the replay window and could make Graph refuse the
+  retry (CC-AUTH-79).
+- A secret redactor that throws while masking a tool result (a JSON body nested
+  too deep to walk, for one) now withholds the result like any other unusable
+  redaction, instead of letting the exception's own message reach the client
+  unredacted (CC-DATA-108).
+- A tool result's text block no longer carries invisible characters. Before, it was
+  plain `JSON.stringify` of the payload, which leaves DEL, C1 controls, bidi
+  overrides, zero-width and tag characters and U+2028/U+2029 raw. So a caption,
+  username, id or cursor could reorder what the model reads, hide text, or break the
+  line and forge an `Instagram error (…)` frame. Each such character is now a JSON
+  `\uXXXX` escape, so the text still parses to `structuredContent`. The escaping is
+  applied in the registry after secret masking, on error results too.
+  `structuredContent` still carries wire text as received, so emoji ZWJ sequences
+  and right-to-left marks are preserved. The rule is documented in
+  docs/security.md §7 (CC-DATA-102, CC-DATA-103).
+- A tool result's JSON text block is now redacted as a parsed value and
+  re-serialized, so key-name masking and a registered secret that contains a
+  character JSON escapes both reach the text, not only `structuredContent`. If the
+  redacted value cannot be serialized, the result is withheld (CC-DATA-104).
+- A container or child id that Graph returns is quoted with visible escapes and a
+  64-character cap in publishing errors and acknowledgements unless it matches the
+  Graph id grammar, so a forged id cannot break the line and fake a "Published"
+  message (CC-PUB-56).
+- `login` now masks the app secret, the authorization code and both tokens in
+  their form-encoded spelling (`%2B`, `%2F`, `%3D`, `+`) as well as raw, so a
+  transport or persist error quoting an encoded request cannot print them
+  (CC-AUTH-76).
+
+- `discover_business`: the `mediaAfter` cursor is interpolated into a Graph
+  field expression, which has no escaping. Like `username`, it is therefore
+  pinned to a strict charset (`^[A-Za-z0-9_+/=-]{1,2048}$`) in the tool
+  schema, and re-checked in the api layer. The refusal does not echo the value
+  (CC-DATA-116).
+- A `paging.next` URL that names `after` more than once is now read as an
+  unusable cursor, where the first copy used to be followed silently (CC-DATA-117).
+- The secret redactor, and the token stripper applied to Graph error text, no longer take quadratic time on a long identifier-like run that starts with `IG_` and repeats `IG` plus a letter. 200 000 such characters used to block the whole server for about 15 seconds. The same run now takes a few milliseconds. What is masked and what is kept is unchanged. (CC-DATA-121)
+- A string wrapped in a `String` object (`new String(token)`) inside a value the redactor copies is now masked as one string. Before, it was copied one character per key, so no secret pattern could match it and the secret reached the log in pieces. Wrapped numbers and booleans now keep their value instead of becoming `{}`. (CC-DATA-122)
+
+- A usage refusal no longer writes a secret into the host's log. `instagram-mcp-ai --access-token=<token>` (or a bare pasted token as the first argument) was refused with the whole token echoed to stderr, which MCP hosts keep in their log files. Both refusals, for an unknown subcommand and for an argument after `doctor` / `refresh`, now cut the echoed token at its first `=` and mask a token-shaped value as `[REDACTED]`. (CC-PROC-208)
+
+- Path B now sends a time-bound proof: `appsecret_proof` is
+  HMAC-SHA256(app_secret, `access_token|appsecret_time`), sent with
+  `appsecret_time` from the injected clock, so a captured proof expires
+  (CC-AUTH-15).
+- Writes (POST) now carry `access_token` and the proof in the form-encoded body
+  instead of the query string, so they stay out of proxy and access logs. GETs and
+  the bodyless DELETE keep them on the query string (CC-PROC-25).
+- Only the access token is registered with the redactor per request. The
+  per-second `appsecret_proof` / `appsecret_time` are not, which would grow the
+  registry without bound and mask matching digits inside Graph ids; the proof is
+  covered by the 64-hex backstop.
+- The redactor honours an inherited `toJSON` (CC-DATA-123) and masks keys named
+  `access-token`, `app_secret`, `client_secret` and `authorization` in any
+  separator spelling (CC-DATA-124).
+- `login` / `refresh` now rewrite an env-store assignment written with dotenv's
+  colon separator (`IG_ACCESS_TOKEN: …`) in place, instead of appending below it and
+  leaving the superseded token on disk in plaintext (CC-CFG-78).
+- `login` / `refresh` now split the env store on every line ending dotenv honours,
+  including a lone CR. A superseded token in a CR-terminated stretch is no longer
+  left on disk, and such a file no longer makes the write refuse (CC-CFG-80).
+- A plain `Uint8Array` (a `TextEncoder` result, a stream chunk) whose bytes spell
+  a token or a registered secret is now masked as a unit by the redactor, as a
+  `Buffer` already was. Before, it was copied as one number per byte, which no
+  secret pattern can match, so the secret reached the log byte by byte
+  (CC-AUTH-80).
+- `login` no longer echoes a token-shaped argument in its unknown-argument
+  refusal. A token pasted as a positional (`login --path ig EAA…`) or after a
+  single-dash slip (`-access-token=EAA…`) is now named `[REDACTED]`, as the entry's
+  own refusals already do (CC-CFG-83).
+
+## [0.7.0] — 2026-08-25
+
+First published release. `0.7.0` rather than `0.1.0` because the feature surface
+is complete — all 28 tools across five packages, both auth paths, four
+distribution manifests — and what separates it from `1.0.0` is field validation
+against live accounts, not missing functionality. The `0.0.1` that appeared in
+the manifests before this tag was a pre-release placeholder and was never
+published to any channel.
+
+npm is the only channel published by this tag. The MCP-registry submission, the
+MCPB bundle and the Claude Code plugin listing are separate manual steps (see
+`docs/release-checklist.md`); their manifests carry `0.7.0` so they are ready to
+submit, but carrying the version is not the same as being listed.
+
+### Added
+
+- **Frozen contracts + core substrate.** Shared type contracts (`ToolSpec`,
+  `InstagramError` with a `kind` discriminant, `IgRequestFn`, `AuthProvider`,
+  config/profile/settings shapes, injectable `Clock`); auth providers for both
+  Instagram-login and Facebook-login paths with per-profile mode resolution and
+  `appsecret_proof`; an HTTP client (`igRequest`) with a hard SSRF host allowlist,
+  the retry/backoff matrix (`Retry-After` cap, per-host semaphore), usage-header
+  parsing, and the `v25.0` version pin; a redaction layer masking configured
+  secrets and token-shaped strings; the `InstagramError` taxonomy mapping the full
+  Graph error/subcode table.
+- **Read path.** `account` package (get account, list linked accounts, token
+  status), `media` package (list/get media, toggle comments), and `insights`
+  package (account/media insights, audience demographics, online followers) with
+  the post-2025 `views`-based metric set, cursor pagination, and code-point-safe
+  truncation.
+- **Write path (through the write gate).** `publishing` package implementing the
+  container → publish flow for feed images, carousels, Reels, and Stories
+  (composite post tools with a poll budget, resumable containers, runtime quota
+  checks), plus comment moderation (list/get/reply/create/hide/unhide/delete and
+  tagged media). Every write is preview-by-default with `apply` to execute;
+  irreversible deletes are double-gated; `media_publish` is never auto-retried.
+- **Discovery** (Facebook-login only). Hashtag search with a local 30-per-7-days
+  budget tracker, hashtag media, and business discovery of public competitor
+  profiles.
+- **CLI.** `login` (loopback OAuth for both paths with a checked `state`),
+  `doctor` (token validity, account resolution, scope inventory, publishing quota,
+  usage headroom, Meta-app Development/Live mode, config-tier report), and
+  `refresh` (Path-A token refresh with a configurable threshold).
+- **Transports.** stdio (default, stdout-purity guarded) and an opt-in,
+  loopback-bound Streamable HTTP transport with a constant-time bearer check.
+- **Distribution manifests for four channels.** `package.json` (npm) as the single
+  source of truth, `server.json` (MCP registry), `manifest.json` (MCPB bundle for
+  Claude Desktop) and `.claude-plugin/plugin.json` (Claude Code plugin, launching
+  the server through a version-pinned `npx`). A release drift test asserts all
+  four agree on the version, and the plugin manifest is deliberately excluded from
+  the npm tarball.
+- **Quality gate.** `npm run check` now runs `lint → format:check → build →
+  coverage → audit`. Coverage is enforced by c8 `--check-coverage` thresholds
+  rather than merely reported, and `npm run audit` hard-gates high-severity
+  advisories in the runtime dependency tree (`--omit=dev`), with dev-only
+  advisories surfaced informationally by `npm run audit:dev`.
+
+### Fixed
+
+- The **moderate** path-traversal advisory
+  ([GHSA-frvp-7c67-39w9](https://github.com/advisories/GHSA-frvp-7c67-39w9)) in
+  `@hono/node-server`, reached transitively through `@modelcontextprotocol/sdk`,
+  is cleared: the lockfile now resolves a patched version, and
+  `npm audit --omit=dev` reports zero advisories in the runtime tree.
+
+### Known limitations
+
+- No tool has been exercised against a live Instagram account by CI. The suite is
+  fully offline by construction — every test injects its transport and a
+  `globalThis.fetch` guard fails the test if a mutant reaches the network — so
+  what is proven is behaviour against recorded Graph shapes, not against Meta's
+  live responses. Live-probe scripts exist (`scripts/live-probe.mjs`) but are
+  operator-run.
+
+[Unreleased]: https://github.com/IvanBBaev/instagram-mcp/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/IvanBBaev/instagram-mcp/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/IvanBBaev/instagram-mcp/releases/tag/v0.7.0

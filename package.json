@@ -1,0 +1,17 @@
+{
+  "name": "secure-meta-mcp-source",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Source distribution of hardened Facebook and Instagram MCP servers; not affiliated with Meta or upstream authors.",
+  "license": "MIT",
+  "engines": { "node": ">=22.22.0" },
+  "scripts": {
+    "setup": "node scripts/project.mjs setup",
+    "build": "node scripts/project.mjs build",
+    "test": "node scripts/project.mjs test",
+    "audit": "node scripts/project.mjs audit",
+    "check": "node scripts/project.mjs check",
+    "config": "node scripts/print-config.mjs"
+  }
+}

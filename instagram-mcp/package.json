@@ -1,0 +1,88 @@
+{
+  "name": "instagram-mcp-ai",
+  "version": "0.8.0",
+  "description": "MCP server for the Instagram Platform (Meta Graph API) \u2014 professional-account tools.",
+  "mcpName": "io.github.IvanBBaev/instagram-mcp-ai",
+  "type": "module",
+  "main": "dist/src/index.js",
+  "bin": {
+    "instagram-mcp-ai": "bin/instagram-mcp-ai.cjs"
+  },
+  "exports": {
+    ".": "./dist/src/index.js"
+  },
+  "files": [
+    "dist/src/**/*.js",
+    "dist/src/**/*.d.ts",
+    "bin/",
+    "server.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT",
+  "author": "Ivan Baev <ivanbbaev@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/IvanBBaev/instagram-mcp.git"
+  },
+  "homepage": "https://ivanbbaev.github.io/instagram-mcp/",
+  "bugs": {
+    "url": "https://github.com/IvanBBaev/instagram-mcp/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "node ../scripts/run-tests.mjs instagram",
+    "test:corpus": "node scripts/assert-test-corpus.mjs",
+    "test:full": "npm run build && npm run test:corpus && npm test",
+    "coverage": "c8 --all --include='dist/src/**/*.js' --include='dist/test/helpers/**/*.js' --include='bin/**/*.cjs' --reporter=text --reporter=lcov --check-coverage --statements=100 --branches=100 --functions=100 --lines=100 npm test",
+    "audit": "npm audit --audit-level=high --omit=dev",
+    "audit:dev": "npm audit --audit-level=high",
+    "gen:readme": "npm run build && node scripts/gen-readme.mjs",
+    "gen:manifest": "npm run build && node scripts/gen-manifest-tools.mjs",
+    "check": "npm run lint && npm run format:check && npm run build && npm run test:corpus && npm run coverage && npm run audit",
+    "prepublishOnly": "node -e \"throw new Error('Private source distribution: publish the parent Git repository, not this upstream npm package.')\"",
+    "test:upstream": "node --test \"dist/**/*.test.js\""
+  },
+  "dependencies": {
+    "@modelcontextprotocol/node": "2.1.1",
+    "@modelcontextprotocol/server": "2.3.1",
+    "dotenv": "18.0.7",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@modelcontextprotocol/client": "2.3.1",
+    "@modelcontextprotocol/core": "2.3.1",
+    "@types/node": "22.20.5",
+    "c8": "12.0.0",
+    "eslint": "10.12.0",
+    "eslint-config-prettier": "10.1.8",
+    "fast-check": "4.10.2",
+    "prettier": "3.9.10",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.71.1"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "instagram",
+    "meta",
+    "graph-api",
+    "instagram-api",
+    "social-media",
+    "llm",
+    "ai"
+  ],
+  "trademark": "instagram-mcp-ai is an independent, community-built project and is not affiliated with, endorsed by, or sponsored by Meta Platforms, Inc. Instagram and Meta are trademarks of Meta Platforms, Inc., used here only nominatively to indicate compatibility.",
+  "private": true
+}

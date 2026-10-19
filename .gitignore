@@ -1,0 +1,15 @@
+**/node_modules/
+facebook-mcp/build/
+instagram-mcp/dist/
+**/coverage/
+**/.nyc_output/
+**/.env
+**/.env.*
+!**/.env.example
+*.log
+*.jsonl
+*.ndjson
+*.mcpb
+*.tgz
+local/
+.DS_Store

@@ -1,0 +1,87 @@
+{
+  "name": "@ivanbaev/facebook-mcp",
+  "version": "0.7.0",
+  "mcpName": "io.github.IvanBBaev/facebook-mcp",
+  "description": "Local-first TypeScript MCP server for the Meta Graph API that lets an MCP client publish, read and moderate Facebook Pages through your own Meta developer app, with least-privilege tokens, plan-and-apply write safety and no telemetry.",
+  "license": "MIT",
+  "author": "Ivan Baev <ivanbbaev@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/IvanBBaev/facebook-mcp.git"
+  },
+  "homepage": "https://github.com/IvanBBaev/facebook-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/IvanBBaev/facebook-mcp/issues"
+  },
+  "type": "module",
+  "bin": {
+    "facebook-mcp": "bin/facebook-mcp.mjs"
+  },
+  "main": "./build/index.js",
+  "files": [
+    "build",
+    "!build/**/*.map",
+    "!build/**/*.test.js",
+    "!build/**/*.test.d.ts",
+    "!build/testing",
+    "!build/core/fakes",
+    "!build/mcp/transport.spawn-fixture.*",
+    "!build/mcpb",
+    "bin"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "node -e \"require('fs').rmSync('build',{recursive:true,force:true})\" && tsc",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "node ../scripts/run-tests.mjs facebook",
+    "coverage": "npm run build && c8 node --import ./build/testing/network-fence.js --test \"build/**/*.test.js\"",
+    "smoke": "node scripts/smoke/run.mjs",
+    "smoke:rehearse": "node scripts/smoke/rehearse.mjs",
+    "smoke:plan": "node scripts/smoke/run.mjs --plan",
+    "cold-start": "node scripts/cold-start.mjs",
+    "fixtures:shape-diff": "node scripts/fixture-shape-diff.mjs",
+    "metadata": "npm run build && node scripts/gen-metadata.mjs --write",
+    "metadata:check": "node scripts/gen-metadata.mjs --check",
+    "pack:mcpb": "npm run build && node scripts/pack-mcpb.mjs",
+    "guard:no-install-scripts": "node -e \"const s=JSON.parse(require('fs').readFileSync('package.json','utf8')).scripts||{};const bad=['preinstall','install','postinstall','prepare'].filter(k=>k in s);if(bad.length){console.error('Policy violation: package.json declares install lifecycle script(s): '+bad.join(', ')+'. This package runs no code at install time; the post-install check is the doctor subcommand, run by the user.');process.exit(1)}console.log('no install lifecycle scripts declared - ok')\"",
+    "check": "npm run guard:no-install-scripts && npm run typecheck && npm run lint && npm run format:check && npm run build && npm run test",
+    "preversion": "node -e \"console.error('Refusing: do not bump the version with npm version. scripts/metadata.config.mjs is the version SSOT and npm run metadata re-stamps package.json from it, silently reverting the bump. Edit identity.version there, then run npm run metadata. See docs/runbooks/release.md.');process.exit(1)\"",
+    "prepublishOnly": "node -e \"throw new Error('Private source distribution: publish the parent Git repository, not this upstream npm package.')\"",
+    "test:upstream": "node --import ./build/testing/network-fence.js --test \"build/**/*.test.js\""
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "dotenv": "17.4.2",
+    "zod": "3.25.76"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.5",
+    "@types/node": "22.20.1",
+    "c8": "12.0.0",
+    "eslint": "9.39.5",
+    "eslint-config-prettier": "10.1.8",
+    "eslint-import-resolver-typescript": "4.4.5",
+    "eslint-plugin-import-x": "4.17.1",
+    "globals": "15.15.0",
+    "prettier": "3.9.6",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.65.0"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "facebook",
+    "meta",
+    "graph-api",
+    "pages",
+    "llm",
+    "ai"
+  ],
+  "trademark": "This is an independent, community-built project and is not affiliated with, endorsed by, or sponsored by Meta Platforms, Inc. Facebook, Meta and related marks are trademarks of Meta Platforms, Inc., used here only nominatively to indicate compatibility.",
+  "private": true
+}

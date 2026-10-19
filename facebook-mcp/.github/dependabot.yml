@@ -1,0 +1,27 @@
+# Automated dependency updates (npm + GitHub Actions), weekly. Minor/patch are
+# grouped to keep PR noise low; majors stay separate so breaking bumps get
+# individual review. The github-actions ecosystem bumps the SHA-pinned actions.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      minor-and-patch:
+        update-types: ['minor', 'patch']
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      # codeql-action/init and codeql-action/analyze are one product. Ungrouped,
+      # Dependabot opens a PR per entry point, so each PR moves only half the
+      # pair and CodeQL fails with "Loaded a configuration file for version X,
+      # but running version Y". This group must therefore cover every
+      # update-type, majors included — the pair may never split.
+      codeql-action:
+        patterns: ['github/codeql-action*']
+      minor-and-patch:
+        update-types: ['minor', 'patch']

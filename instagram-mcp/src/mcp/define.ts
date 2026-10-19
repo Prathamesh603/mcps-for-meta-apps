@@ -1,0 +1,118 @@
+/**
+ * ToolSpec contract (Layer 2 seam). FROZEN at Gate G1. Every tool is a
+ * `ToolSpec` object (tools-as-data); `tools/` files export these and `mcp/
+ * registry.ts` turns them into MCP registrations. See docs/architecture.md §3.
+ */
+// Equivalent-mutant note: dropping `type` from this import (`import { z } from 'zod'`)
+// cannot be observed. `z` is referenced only in type positions in this file, so TypeScript
+// elides the binding either way and the emitted JavaScript is byte-identical — there is no
+// runtime import to detect and no type-check difference to assert on.
+import type { z } from 'zod';
+import type { AuthPath, IgRequestFn, Logger, ResolvedProfile, Settings } from '../core/types.js';
+import type { Clock } from '../core/clock.js';
+
+/**
+ * MCP tool annotations surfaced to clients for permission UX.
+ *
+ * Equivalent-mutant note: writing `ToolSpec.annotations` as `Partial<ToolAnnotationSet>`
+ * is unobservable, because every member below is already optional — `Partial` is the
+ * identity mapping over this type, so both spellings accept and produce exactly the same
+ * values and no assertion can separate them.
+ */
+export interface ToolAnnotationSet {
+  readOnlyHint?: boolean;
+  destructiveHint?: boolean;
+  idempotentHint?: boolean;
+  /** Always true here — every tool hits a remote API. */
+  openWorldHint?: boolean;
+}
+
+export interface ToolTextContent {
+  type: 'text';
+  text: string;
+}
+
+/**
+ * Equivalent-mutant note: `ToolContent` is a bare alias, so restating `ToolResult.content`
+ * as `ToolTextContent[]` names the identical type. The alias exists to mark the extension
+ * point for future content kinds (image, resource); until a second member joins the union
+ * the two spellings are the same type and nothing can tell them apart.
+ */
+export type ToolContent = ToolTextContent;
+
+/** MCP `CallToolResult` subset the handlers produce. */
+export interface ToolResult {
+  content: ToolContent[];
+  structuredContent?: Record<string, unknown>;
+  isError?: boolean;
+}
+
+/**
+ * A tool's zod raw shape: field name to a *classic* zod schema. zod 4's own
+ * `z.ZodRawShape` is a readonly map of core `$ZodType`s, which hides the classic
+ * API (`.description`, `.safeParse`) from everything that reads a spec's fields.
+ */
+export type ToolShape = Record<string, z.ZodType>;
+
+/**
+ * Parsed handler args: the tool's declared input plus the framework-injected
+ * `account` selector (multi-profile). Write tools additionally see `apply`.
+ */
+export type ToolInputArgs<S extends ToolShape> = z.infer<z.ZodObject<S>> & {
+  account?: string;
+  apply?: boolean;
+};
+
+/**
+ * Per-call dependencies handed to every tool handler. Resolved by the registry
+ * from the active profile + config; domain code takes what it needs and stays
+ * decoupled from how these are built. `req` is the only network seam.
+ */
+export interface ToolContext {
+  req: IgRequestFn;
+  settings: Settings;
+  profile: ResolvedProfile;
+  clock: Clock;
+  log: Logger;
+}
+
+export interface ToolSpec<S extends ToolShape = ToolShape> {
+  /** `instagram_<verb>_<noun>`. */
+  name: string;
+  title: string;
+  /** Model-facing; states Graph semantics honestly. */
+  description: string;
+  /** Registry package tag (must match its PACKAGES manifest entry). */
+  package: string;
+  /**
+   * D1 capability matrix: auth paths this tool is valid for. `undefined` =
+   * both. The registry filters the surface and a call-time guard enforces it.
+   */
+  paths?: AuthPath[];
+  annotations: ToolAnnotationSet;
+  /** zod raw shape; every field `.describe()`d. Registered with `.strict()`. */
+  input: S;
+  /** structuredContent schema where the shape is stable. */
+  output?: ToolShape;
+  /** Fields safe to log — never secrets. */
+  logFields?: (args: ToolInputArgs<S>) => Record<string, unknown>;
+  handler: (args: ToolInputArgs<S>, ctx: ToolContext) => ToolResult | Promise<ToolResult>;
+}
+
+/**
+ * Identity helper preserving the generic `S` at definition sites.
+ *
+ * Equivalent-mutant note: rewriting this declaration as an arrow constant
+ * (`export const defineTool = <S extends ToolShape>(spec: ToolSpec<S>) => spec`) is
+ * unobservable from outside the module. Arity, `Function.prototype.name`, the returned
+ * reference and the inferred type are all unchanged. What does change is hoisting, and
+ * `.prototype`/constructability — an arrow has no `.prototype` and `new defineTool(…)`
+ * throws. Nothing calls `defineTool` above this line and nothing constructs it, so none
+ * of the three is reachable from outside.
+ *
+ * Equivalent-mutant note: `return spec as ToolSpec<S>` is equally unobservable. `spec` is
+ * already declared `ToolSpec<S>`, so the assertion narrows nothing and erases at emit.
+ */
+export function defineTool<S extends ToolShape>(spec: ToolSpec<S>): ToolSpec<S> {
+  return spec;
+}

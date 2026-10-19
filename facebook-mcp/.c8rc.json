@@ -1,0 +1,21 @@
+{
+  "//": "Coverage is measured over the COMPILED output, because that is what the test runner executes (`node --test build/**/*.test.js`). c8 applies include/exclude to the executed URL BEFORE source-map remapping, so filtering on `src/**/*.ts` here matches nothing and silently reports 0%. Include the build output instead; the reporter still prints `src/*.ts` paths, remapped through the emitted source maps.",
+  "all": false,
+  "include": ["build/**/*.js"],
+  "exclude": [
+    "build/**/*.test.js",
+    "build/**/*.spawn-fixture.js",
+    "build/testing/**",
+    "build/core/fakes/**",
+    "**/*.d.ts",
+    "coverage/**",
+    "node_modules/**"
+  ],
+  "reporter": ["text", "text-summary", "lcov"],
+  "reports-dir": "coverage",
+  "check-coverage": true,
+  "lines": 95,
+  "branches": 85,
+  "functions": 95,
+  "statements": 95
+}

@@ -1,0 +1,12 @@
+This distribution contains modified copies of:
+
+facebook-mcp — Ivan Baev / IvanBBaev
+https://github.com/IvanBBaev/facebook-mcp
+
+instagram-mcp — Ivan Baev / IvanBBaev
+https://github.com/IvanBBaev/instagram-mcp
+
+The original MIT licenses and copyright notices are preserved in each component's LICENSE file.
+Independent hardening changes and parent tooling are distributed under the root MIT LICENSE.
+This project is not affiliated with or endorsed by the upstream author or Meta Platforms, Inc.
+Facebook, Instagram and Meta trademarks belong to their respective owners.

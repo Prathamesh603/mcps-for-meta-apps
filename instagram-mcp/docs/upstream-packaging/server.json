@@ -1,0 +1,70 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.IvanBBaev/instagram-mcp-ai",
+  "description": "MCP server for the Instagram Platform (Meta Graph API) — professional-account tools.",
+  "repository": {
+    "url": "https://github.com/IvanBBaev/instagram-mcp",
+    "source": "github"
+  },
+  "version": "0.8.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "instagram-mcp-ai",
+      "version": "0.8.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "IG_ACCESS_TOKEN",
+          "description": "Long-lived Instagram access token for the professional account.",
+          "isRequired": true,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "IG_ACCOUNT_ID",
+          "description": "Instagram professional-account ID. Optional with an Instagram-Login token (calls then address `me`); set it with a Facebook-Login (Page / system-user) token, where `me` is not the Instagram account.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "IG_APP_ID",
+          "description": "Meta app ID; enables token exchange/refresh, appsecret_proof, and business discovery.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "IG_APP_SECRET",
+          "description": "Meta app secret; required alongside IG_APP_ID for token refresh and appsecret_proof.",
+          "isRequired": false,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "IG_AUTH_MODE",
+          "description": "Auth path: ig-login (Instagram Login, default) or fb-login (Facebook Login). Set it explicitly when both app fields are filled.",
+          "isRequired": false,
+          "format": "string",
+          "choices": ["ig-login", "fb-login"]
+        },
+        {
+          "name": "IG_WRITE_MODE",
+          "description": "preview (default, plan only) or apply (execute write tools).",
+          "isRequired": false,
+          "format": "string",
+          "choices": ["preview", "apply"],
+          "default": "preview"
+        },
+        {
+          "name": "IG_TOOL_PACKAGES",
+          "description": "Tool packages to register: core (default), reader, publisher, all, or a comma-separated list.",
+          "isRequired": false,
+          "format": "string",
+          "default": "core"
+        }
+      ]
+    }
+  ]
+}

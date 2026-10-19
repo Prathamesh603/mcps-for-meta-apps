@@ -1,0 +1,916 @@
+name: Release
+
+# Tag-driven, CI-only release rail. Nothing is ever published from a developer
+# machine: the only way to reach npm, the GitHub Release or the MCP Registry is
+# to push a `v*.*.*` tag whose version matches every metadata surface in the
+# repo and whose commit passes the full `npm run check`.
+#
+# Trust properties this workflow is designed to keep:
+#   * Publishing is OIDC-first. npm publishing uses Trusted Publishing (GitHub
+#     OIDC), the MCP Registry uses `mcp-publisher login github-oidc`. Neither
+#     reads a stored credential, so in steady state there is no publish secret
+#     here to steal or to silently expire — and adding one back is never the fix
+#     for a failed run.
+#     Bootstrap exception (once): npm binds a trusted publisher to an *existing*
+#     package page, so the very first tarball for a never-published name cannot
+#     use OIDC. For that publish only, the `npm-publish` job reads an
+#     `NPM_TOKEN` secret — a short-lived granular token, single package,
+#     read+write, no org access. It is a fallback, not a mode: `setup-node`
+#     writes the token into `.npmrc` only if the secret is non-empty, so once the
+#     trusted publisher is configured and the secret is deleted, the identical
+#     job publishes over OIDC with no edit here. Delete the secret in the same
+#     sitting as the bootstrap publish — see docs/runbooks/release.md,
+#     "One-time setup".
+#   * No Meta credential is ever available here (see SECURITY.md); this workflow
+#     runs no Graph API traffic.
+#   * Least privilege: the workflow-level token is read-only, `id-token: write`
+#     is granted only to the two OIDC jobs, and `contents: write` only to the
+#     job that uploads release assets.
+#   * Every third-party action is pinned to a commit SHA (the `# vX.Y.Z` comment
+#     is what Dependabot keeps current), and the `mcp-publisher` binary is
+#     version-pinned and verified against a SHA-256 committed to *this* repo —
+#     never against a checksum file fetched from the same place as the binary.
+#   * Both shipped artifacts carry verifiable provenance: the npm tarball via
+#     `npm publish --provenance`, the `.mcpb` bundle via a build-provenance
+#     attestation that is re-verified here before the asset is made public.
+#   * Fail closed. No step is `continue-on-error`; a failed gate stops the rail.
+#
+# `workflow_dispatch` runs the identical pipeline as a rehearsal: the gate and
+# the bundle build are real, every publishing step becomes a dry run.
+#
+# The one exception is `mode: resume` with a `tag` input, and it recovers exactly
+# one job: `mcp-registry`. npm publishing is one-shot — a version cannot be
+# published twice — so once the npm half succeeds, re-tagging would die on the npm
+# step before reaching anything downstream. `resume` leaves npm exactly as it is
+# and runs the registry publish for real against the tarball that is already
+# public.
+#
+# The tag is an *input*, not the ref this is dispatched on, and that separation is
+# the point: `workflow_dispatch` runs the workflow file as it exists at the ref it
+# is dispatched on, so dispatching on the tag would run the rail as it was when
+# that release was cut — which, for any release cut before a fix lands here, is
+# exactly the broken version being recovered from. Dispatch on the default branch
+# to get the current rail; every job then checks out `inputs.tag`, so the *code*
+# that runs is today's and the *contents* it publishes are the release's.
+#
+# Two things `resume` deliberately does NOT do, both because dispatching from a
+# branch changes what the run can honestly claim:
+#
+#   * It does not re-attach the .mcpb bundle, and the `bundle` job is skipped
+#     entirely. `attest-build-provenance` derives its statement from the run's own
+#     context, so a bundle built during a resume would be attested as coming from
+#     `refs/heads/main` at main's HEAD, while the bytes came from the tag's
+#     checkout — a signed, publicly verifiable claim that is false. There is no
+#     ref override, so the only honest option is not to make the claim.
+#   * It is not a general "re-run the release". A failed `github-release` is
+#     recovered by re-running that job from the Actions UI, which replays the
+#     original run's context and therefore keeps the attestation truthful. What a
+#     re-run cannot do is pick up a fix to this file — which is precisely why the
+#     registry, whose failure mode was a workflow bug (too short a wait for npm's
+#     CDN), is the job that needs a dispatch-based recovery and the release job is
+#     not.
+#
+# The MCP Registry is NOT idempotent: a version may be listed exactly once, and a
+# second publish is rejected with `cannot publish duplicate version`. A resume
+# treats that rejection as success — the listing it was sent to create exists —
+# while on a tag push the same response is a hard error, because it means the
+# version was listed before this tag ran.
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'rehearsal (default, publishes nothing) or resume (re-runs the MCP Registry publish for an already-published tag; npm and the GitHub Release are left alone)'
+        type: choice
+        default: rehearsal
+        options: [rehearsal, resume]
+      tag:
+        description: 'resume only: the already-published release tag to finish, e.g. v1.2.3. Dispatch this from the default branch, not from the tag.'
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+# Never let two releases of the same tag interleave; never cancel one mid-flight
+# (a half-published release is worse than a slow one). Keyed on the release tag
+# rather than the ref, because every resume is dispatched on the default branch:
+# keying on `github.ref` would drop every recovery run into one `refs/heads/main`
+# group, and GitHub keeps only one pending run per group — so a second dispatch
+# would silently cancel a recovery still waiting to start.
+concurrency:
+  group: release-${{ inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+env:
+  # The `engines` floor, so the release artifact is built on the oldest runtime
+  # the package claims to support.
+  NODE_VERSION: '22.x'
+  # Pinned mcp-publisher release (github.com/modelcontextprotocol/registry).
+  MCP_PUBLISHER_VERSION: '1.8.1'
+  # SHA-256 of mcp-publisher_linux_amd64.tar.gz for the version above, pinned
+  # HERE rather than trusted from the release's own checksums.txt. Fetching the
+  # checksum from the same host, over the same channel, in the same job as the
+  # binary it is supposed to police proves only that the two files agree — an
+  # attacker who can replace one can replace both. This constant is the actual
+  # trust anchor: it lives in git, changes only in a reviewed commit, and is the
+  # thing a tampered release would have to match.
+  # Re-pin deliberately when raising MCP_PUBLISHER_VERSION:
+  #   curl -fsSL https://github.com/modelcontextprotocol/registry/releases/download/v<V>/registry_<V>_checksums.txt
+  # and cross-check it against the hash of the downloaded asset itself.
+  MCP_PUBLISHER_SHA256: 'a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc'
+  # Exact npm used by the publish job. Node 22 ships npm 10, which predates
+  # Trusted Publishing, so npm must be upgraded there — but `npm@latest` inside
+  # the one job that holds `id-token: write` is an unpinned remote dependency in
+  # the most privileged place in the rail, which contradicts the pinning claim
+  # above. Nothing bumps this automatically; raise it deliberately, in a PR.
+  NPM_VERSION: '11.19.0'
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Gate — a red build, a mismatched version or an unpublishable package.json
+  #    must never reach a registry.
+  # ---------------------------------------------------------------------------
+  gate:
+    name: gate (version + full check)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      release-tag: ${{ steps.resolve.outputs.release-tag }}
+      # `publish` gates everything that only a tag push may do: the npm publish,
+      # the bundle build and the GitHub Release. `registry` is the one flag a
+      # resume also turns on. `resume` is the mode itself, for the steps that have
+      # to behave differently rather than simply not run.
+      publish: ${{ steps.resolve.outputs.publish }}
+      registry: ${{ steps.resolve.outputs.registry }}
+      resume: ${{ steps.resolve.outputs.resume }}
+      dist-tag: ${{ steps.resolve.outputs.dist-tag }}
+      prerelease: ${{ steps.resolve.outputs.prerelease }}
+      # The commit this gate actually validated. Every later job resolves the same
+      # tag NAME again and independently, so they assert against this rather than
+      # trusting the name a second time.
+      commit: ${{ steps.resolve.outputs.commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # A `resume` is dispatched on the default branch to get the current
+          # workflow file, but everything it builds and publishes must come from
+          # the release it is finishing. Empty for every other trigger, where it
+          # falls through to the ref the run was started on.
+          ref: ${{ inputs.tag || github.ref }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+
+      - name: Resolve version and release mode
+        id: resolve
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          MODE: ${{ inputs.mode }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          pkg_version="$(node -p "JSON.parse(require('node:fs').readFileSync('package.json','utf8')).version")"
+
+          # The tag this run is about. On a push it is the ref; on a resume it is
+          # the input, because the run is dispatched on the default branch to get
+          # the current workflow file (see the header note). Every job checks out
+          # this same `inputs.tag || github.ref`, so `pkg_version` above was read
+          # from the release's own checkout either way.
+          release_tag="$REF_NAME"
+
+          # Both inputs carry a `default:`, so the runner sets them even when the
+          # form is left blank - but only for `workflow_dispatch`. On a tag push
+          # the whole context is absent and `set -u` would abort on the first
+          # reference, so every read below is defaulted rather than relying on the
+          # runner exporting empty strings.
+          mode="${MODE:-}"
+          input_tag="${INPUT_TAG:-}"
+          resume=false
+
+          if [ "$EVENT_NAME" = "push" ]; then
+            if [ "$REF_TYPE" != "tag" ]; then
+              echo "::error::Release publishes only from a tag push (got ref_type=$REF_TYPE)."
+              exit 1
+            fi
+            publish=true
+            registry=true
+          elif [ "$mode" = "resume" ]; then
+            # Recovery for a release whose npm half is already done.
+            if [ -z "$input_tag" ]; then
+              echo "::error::resume needs the 'tag' input - the release tag to finish, e.g. v1.2.3."
+              exit 1
+            fi
+            release_tag="$input_tag"
+            resume=true
+            publish=false
+            registry=true
+            echo "::notice::workflow_dispatch resume of $release_tag - npm, the bundle and the GitHub Release are left exactly as they are; only the MCP Registry publish runs for real."
+          else
+            if [ -n "$input_tag" ]; then
+              echo "::error::the 'tag' input only applies to mode 'resume'; a rehearsal runs against the ref it is dispatched on."
+              exit 1
+            fi
+            publish=false
+            registry=false
+            echo "::notice::workflow_dispatch - rehearsal only, nothing will be published."
+          fi
+
+          # A resume checks out `release_tag`, so this assertion still compares
+          # the tag against the package.json that shipped under it - it is not
+          # weakened by the run being dispatched from a branch.
+          if [ "$REF_TYPE" = "tag" ] || [ "$resume" = "true" ]; then
+            case "$release_tag" in
+              v*.*.*) ;;
+              *)
+                echo "::error::'$release_tag' is not a release tag (expected the v*.*.* form)."
+                exit 1
+                ;;
+            esac
+            tag_version="${release_tag#v}"
+            if [ "$tag_version" != "$pkg_version" ]; then
+              echo "::error::Tag $release_tag declares version $tag_version but package.json says $pkg_version."
+              exit 1
+            fi
+            echo "Tag $release_tag matches package.json $pkg_version."
+          else
+            echo "::notice::Rehearsing on branch $REF_NAME - the tag/version assertion is skipped."
+          fi
+
+          # The tag filter `v*.*.*` also matches prereleases (v1.0.0-rc.1), so
+          # the dist-tag has to be derived, never defaulted: an unqualified
+          # `npm publish` writes `latest`, and one `rc` tag would then become the
+          # version every `npm i <pkg>` in the world resolves to.
+          dist_tag="$(node - "$pkg_version" <<'NODE'
+          const version = process.argv[2];
+          const m = /^\d+\.\d+\.\d+(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/.exec(version);
+          if (!m) {
+            console.error(`::error::package.json version "${version}" is not a plain semver version.`);
+            process.exit(1);
+          }
+          if (!m[1]) {
+            process.stdout.write('latest');
+          } else {
+            // 1.0.0-rc.1 -> "rc"; a purely numeric prerelease has no name to
+            // borrow, so it lands on the conventional "next" channel.
+            const name = m[1].split('.').find((p) => !/^\d+$/.test(p));
+            process.stdout.write(name ? name.toLowerCase() : 'next');
+          }
+          NODE
+          )"
+          echo "Version $pkg_version will publish under dist-tag '$dist_tag'."
+
+          # The same distinction, for GitHub Releases. `gh release create` marks
+          # a release "Latest" unless told otherwise, so without this an rc tag
+          # would sit at the top of the releases page and be what every download
+          # link, README badge and "get the latest bundle" instruction resolves
+          # to — the exact failure the dist-tag derivation above prevents on npm.
+          if [ "$dist_tag" = "latest" ]; then prerelease=false; else prerelease=true; fi
+
+          # The exact commit everything downstream must match. `github.sha` is not
+          # it: on a resume that is the default branch's HEAD, not the tag's.
+          commit="$(git rev-parse HEAD)"
+          echo "Gate validated commit $commit."
+
+          {
+            echo "version=$pkg_version"
+            echo "release-tag=$release_tag"
+            echo "commit=$commit"
+            echo "publish=$publish"
+            echo "registry=$registry"
+            echo "resume=$resume"
+            echo "dist-tag=$dist_tag"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Assert the package is publishable and the metadata surfaces agree
+        shell: bash
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          node - "$VERSION" <<'NODE'
+          const fs = require('node:fs');
+          const version = process.argv[2];
+          const problems = [];
+          const read = (p) => JSON.parse(fs.readFileSync(p, 'utf8'));
+
+          const pkg = read('package.json');
+          if (pkg.private === true) {
+            problems.push('package.json still has "private": true - npm publish would refuse.');
+          }
+          if (!pkg.mcpName) {
+            problems.push(
+              'package.json has no "mcpName". The MCP Registry verifies ownership against ' +
+                'the published npm tarball, and the field cannot be added to an already ' +
+                'published version - it must be present on the FIRST publish.',
+            );
+          }
+          // npm >= 11 rejects a bin target written with a leading `./` during
+          // publish: it drops the entry, warns, and publishes a package with no
+          // command. `npm pack` accepts the same field without complaint, so
+          // nothing before this point catches it - and the symptom downstream is
+          // `npx <pkg>` failing for every user, long after the release looked green.
+          for (const [name, target] of Object.entries(pkg.bin ?? {})) {
+            if (typeof target !== 'string') continue;
+            if (target.startsWith('./')) {
+              problems.push(
+                `package.json bin["${name}"] is "${target}". npm would strip this entry at ` +
+                  `publish time and ship a package with no executable. Drop the leading "./".`,
+              );
+            }
+            // The same outcome reached the other way. npm does NOT check that a bin
+            // target exists: `npm pack` on a package whose bin points at a missing
+            // file exits 0 with no warning at all, so a renamed or unshipped
+            // launcher publishes clean and `npx <pkg>` is broken for every user of a
+            // version that can never be republished.
+            if (!fs.existsSync(target)) {
+              problems.push(
+                `package.json bin["${name}"] points at "${target}", which is not in this ` +
+                  'checkout. npm publishes that without a warning and every `npx` fails.',
+              );
+            }
+          }
+
+          const server = read('server.json');
+          if (server.name !== pkg.mcpName) {
+            problems.push(`server.json name "${server.name}" != package.json mcpName "${pkg.mcpName}".`);
+          }
+          if (server.version !== version) {
+            problems.push(`server.json version "${server.version}" != "${version}".`);
+          }
+          for (const p of server.packages ?? []) {
+            if (p.registryType !== 'npm') continue;
+            if (p.identifier !== pkg.name) {
+              problems.push(`server.json npm identifier "${p.identifier}" != package name "${pkg.name}".`);
+            }
+            if (p.version !== version) {
+              problems.push(`server.json npm package version "${p.version}" != "${version}".`);
+            }
+          }
+
+          const manifestPath = ['manifest.json', 'mcpb/manifest.json', '.mcpb/manifest.json']
+            .find((p) => fs.existsSync(p));
+          if (!manifestPath) {
+            problems.push('no MCPB manifest found (expected manifest.json at the repo root).');
+          } else if (read(manifestPath).version !== version) {
+            problems.push(`${manifestPath} version "${read(manifestPath).version}" != "${version}".`);
+          }
+
+          const pluginPath = '.claude-plugin/plugin.json';
+          if (fs.existsSync(pluginPath) && read(pluginPath).version !== version) {
+            problems.push(`${pluginPath} version "${read(pluginPath).version}" != "${version}".`);
+          }
+
+          // The marketplace manifest carries the version TWICE - once for the
+          // marketplace itself and once for the plugin entry inside it. Both are
+          // generated, so both drift together or not at all; check them anyway,
+          // because a hand-edit is exactly what this gate exists to catch.
+          const marketPath = '.claude-plugin/marketplace.json';
+          if (fs.existsSync(marketPath)) {
+            const market = read(marketPath);
+            if (market.metadata?.version !== version) {
+              problems.push(
+                `${marketPath} metadata.version "${market.metadata?.version}" != "${version}".`,
+              );
+            }
+            for (const entry of market.plugins ?? []) {
+              if (entry.version !== version) {
+                problems.push(
+                  `${marketPath} plugins[${entry.name}].version "${entry.version}" != "${version}".`,
+                );
+              }
+            }
+          }
+
+          if (!fs.readFileSync('CHANGELOG.md', 'utf8').includes(`## [${version}]`)) {
+            problems.push(
+              `CHANGELOG.md has no "## [${version}]" section - write the release notes ` +
+                'before tagging, not after.',
+            );
+          }
+
+          if (problems.length > 0) {
+            for (const p of problems) console.error(`::error::${p}`);
+            process.exit(1);
+          }
+          console.log(`Metadata surfaces all agree on ${version}.`);
+          NODE
+
+      - run: npm run check
+
+      # A tag push runs no other workflow: ci.yml triggers on `push: main` and
+      # `pull_request` only, so nothing between the last green CI run and the tag
+      # is re-checked here unless this job does it. `npm run check` deliberately
+      # excludes the generator (it needs build/ and is a separate CI job), so the
+      # drift gate has to be repeated explicitly — a hand-edited server.json or
+      # manifest.json would otherwise ship in the tarball and the bundle.
+      # `npm run check` has already built, so this reads fresh output.
+      - name: Metadata drift check
+        run: npm run metadata:check
+
+      # Same reason: CI's audit gate does not run on a tag. Flags, deliberately:
+      #   --omit=dev      only the dependency tree that actually ships to users;
+      #                   a devDependency advisory must not block a release, and
+      #                   Dependabot/CodeQL cover the build-time tree.
+      #   --audit-level=high  fail on high + critical only. Anything lower is
+      #                   noise that would train the operator to bypass the gate,
+      #                   and with three runtime dependencies a real high here is
+      #                   worth stopping the rail for.
+      #
+      # Advisory-only during a resume. The audit database is external and mutable,
+      # so this is the one gate step whose verdict can change without the tree
+      # changing — and a resume runs it against a tree that is already published
+      # and cannot be amended. Blocking there would mean an advisory filed after
+      # the release stops the registry listing from ever being created, which
+      # helps nobody: the vulnerable tarball is public either way, and the fix is
+      # a new version, not a stuck recovery run.
+      - name: Audit production dependencies
+        shell: bash
+        env:
+          RESUME: ${{ steps.resolve.outputs.resume }}
+        run: |
+          set -euo pipefail
+          if [ "$RESUME" = "true" ]; then
+            npm audit --omit=dev --audit-level=high \
+              || echo "::warning::npm audit reports a high/critical advisory in the production tree of an already-published version. It does not block this recovery run; fix it in the next release."
+          else
+            npm audit --omit=dev --audit-level=high
+          fi
+
+  # ---------------------------------------------------------------------------
+  # 2. npm publish via Trusted Publishing (OIDC), with NODE_AUTH_TOKEN as the
+  #    bootstrap-only fallback for the first publish of a not-yet-existing name.
+  #    Numbered second, but it now RUNS after the bundle (section 3): of the two
+  #    artifacts this rail ships, only this one cannot be taken back.
+  # ---------------------------------------------------------------------------
+  npm-publish:
+    name: npm publish (trusted publishing)
+    # Both this job and `bundle` used to hang off `gate` alone, so they raced.
+    # A bundle that failed to pack, attest or verify could still lose that race
+    # to a successful `npm publish`, leaving the version spent on npm with no
+    # Release to go with it - and an npm version, once taken, is never reusable.
+    # Ordering the irreversible step last turns that failure back into a re-run.
+    #
+    # The result test, rather than a bare `needs: [gate, bundle]`: `bundle` is
+    # deliberately skipped on a resume, and a skipped dependency skips its
+    # dependants, which would disable the one mode whose entire purpose is to
+    # finish an interrupted publish. So: publish when the bundle succeeded, or
+    # when it was skipped on purpose; never when it failed. `!cancelled()` is
+    # what stops a cancelled run from publishing anyway - `always()` would not.
+    needs: [gate, bundle]
+    if: >-
+      !cancelled()
+      && needs.gate.result == 'success'
+      && (needs.bundle.result == 'success' || needs.bundle.result == 'skipped')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # OIDC identity for npm Trusted Publishing + provenance
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # A `resume` is dispatched on the default branch to get the current
+          # workflow file, but everything it builds and publishes must come from
+          # the release it is finishing. Empty for every other trigger, where it
+          # falls through to the ref the run was started on.
+          ref: ${{ inputs.tag || github.ref }}
+          persist-credentials: false
+
+      # `ref` above is a tag NAME, and every job resolves it independently. A tag
+      # can be force-moved, so a run whose gate passed on one commit can still
+      # build and publish another — the checks would have been applied to code
+      # that is not what ships, and for npm that is unrecoverable. Resolving the
+      # name a second time cannot detect that; comparing the commit can. This
+      # changes nothing about what is checked out, it only refuses to continue
+      # when it is not what was approved.
+      - name: Assert this is the commit the gate approved
+        shell: bash
+        env:
+          EXPECTED_COMMIT: ${{ needs.gate.outputs.commit }}
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD)"
+          if [ "$actual" != "$EXPECTED_COMMIT" ]; then
+            echo "::error::This job checked out $actual but the gate validated $EXPECTED_COMMIT - the ref moved mid-run, so nothing here has been gated. Do not re-run: re-cut the release from a stable tag."
+            exit 1
+          fi
+          echo "Running against the gated commit $actual."
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: 'https://registry.npmjs.org'
+          cache: npm
+
+      # Node 22 ships npm 10, which predates Trusted Publishing. Upgrade to the
+      # pinned NPM_VERSION and assert, so neither a silent downgrade nor a
+      # surprise `npm@latest` can change what runs in this privileged job.
+      - name: Ensure npm supports Trusted Publishing
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install -g "npm@${NPM_VERSION}"
+          npm --version
+          node - "$(npm --version)" <<'NODE'
+          const [maj, min, pat] = process.argv[2].split('.').map(Number);
+          const ok = maj > 11 || (maj === 11 && (min > 5 || (min === 5 && pat >= 1)));
+          if (!ok) {
+            console.error(`::error::npm ${process.argv[2]} is older than 11.5.1 and cannot use Trusted Publishing.`);
+            process.exit(1);
+          }
+          NODE
+
+      # `--ignore-scripts`: this job holds `id-token: write` and, during the
+      # bootstrap window, the npm token. A postinstall from anywhere in the dev
+      # tree would therefore execute in the most privileged step of the rail, and
+      # the tree does contain one today (unrs-resolver, pulled in by ESLint's
+      # import resolver). Nothing here needs it: the build is `tsc`, and ESLint
+      # runs in `gate`, which is why that job keeps a plain `npm ci`.
+      - run: npm ci --ignore-scripts
+      - run: npm run build
+
+      # --tag is always explicit. `npm publish` defaults to `latest`, and the
+      # release trigger accepts prerelease tags, so the default would silently
+      # hand `latest` to a release candidate.
+      #
+      # NODE_AUTH_TOKEN is the bootstrap fallback described in the header. npm
+      # prefers it over OIDC when it is set, which is why the secret must be
+      # deleted once the trusted publisher exists — otherwise every later release
+      # keeps authenticating with a credential nobody is watching. An empty or
+      # absent secret is not an error: `setup-node`'s .npmrc line then resolves to
+      # nothing and npm falls through to Trusted Publishing.
+      - name: Publish
+        shell: bash
+        env:
+          PUBLISH: ${{ needs.gate.outputs.publish }}
+          DIST_TAG: ${{ needs.gate.outputs.dist-tag }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -n "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "::warning::Publishing with the NPM_TOKEN bootstrap credential, not OIDC. Configure the trusted publisher and delete this secret (docs/runbooks/release.md)."
+            # Which npm account the token belongs to. A token that is valid but
+            # owned by an account that does not own the package scope fails with a
+            # 404 on PUT - indistinguishable, from the error alone, from a token
+            # whose permissions are too narrow. The username is public data.
+            echo "npm identity for this token: $(npm whoami 2>&1 || echo '<whoami failed>')"
+          else
+            echo "No NPM_TOKEN set - publishing via Trusted Publishing (OIDC)."
+          fi
+          if [ -z "$DIST_TAG" ]; then
+            echo "::error::gate produced no dist-tag; refusing to publish with npm's default."
+            exit 1
+          fi
+          echo "Publishing under dist-tag '$DIST_TAG'."
+          if [ "$PUBLISH" = "true" ]; then
+            npm publish --provenance --access public --tag "$DIST_TAG"
+          else
+            echo "Rehearsal: running npm publish --dry-run."
+            npm publish --provenance --access public --tag "$DIST_TAG" --dry-run
+          fi
+
+  # ---------------------------------------------------------------------------
+  # 3. MCPB bundle. Built with a read-only token, handed to the release job as
+  #    an artifact so the packing step never holds `contents: write`.
+  # ---------------------------------------------------------------------------
+  bundle:
+    name: mcpb bundle
+    needs: gate
+    # Skipped on a resume, which skips `github-release` with it (a skipped
+    # dependency skips its dependants). `npm-publish` also depends on this job,
+    # but tests its result explicitly instead of inheriting the skip, so a resume
+    # still publishes. The reason for skipping is the attestation below: it is
+    # derived from the run's own context, and a resume runs on the default branch,
+    # so the statement would claim a source ref and commit that are not where the
+    # bytes came from. See the header note.
+    if: needs.gate.outputs.resume != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # OIDC identity for the build-provenance attestation
+      attestations: write # write the attestation to the repo's attestation store
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # A `resume` is dispatched on the default branch to get the current
+          # workflow file, but everything it builds and publishes must come from
+          # the release it is finishing. Empty for every other trigger, where it
+          # falls through to the ref the run was started on.
+          ref: ${{ inputs.tag || github.ref }}
+          persist-credentials: false
+
+      # `ref` above is a tag NAME, and every job resolves it independently. A tag
+      # can be force-moved, so a run whose gate passed on one commit can still
+      # build and publish another — the checks would have been applied to code
+      # that is not what ships, and for npm that is unrecoverable. Resolving the
+      # name a second time cannot detect that; comparing the commit can. This
+      # changes nothing about what is checked out, it only refuses to continue
+      # when it is not what was approved.
+      - name: Assert this is the commit the gate approved
+        shell: bash
+        env:
+          EXPECTED_COMMIT: ${{ needs.gate.outputs.commit }}
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD)"
+          if [ "$actual" != "$EXPECTED_COMMIT" ]; then
+            echo "::error::This job checked out $actual but the gate validated $EXPECTED_COMMIT - the ref moved mid-run, so nothing here has been gated. Do not re-run: re-cut the release from a stable tag."
+            exit 1
+          fi
+          echo "Running against the gated commit $actual."
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      # `--ignore-scripts` for the same reason as `npm-publish`, plus one specific
+      # to this job: it holds `attestations: write`, so anything that could tamper
+      # with the tree before `pack-mcpb` runs would be tampering with bytes this
+      # workflow then signs a provenance statement over. The packer already stages
+      # the bundle's own dependencies with `--ignore-scripts`; this makes the
+      # install that precedes it consistent with that.
+      - run: npm ci --ignore-scripts
+      - run: npm run build
+
+      # --json-out, not `--json | tee`: the packer shells out to `npm ci` to stage
+      # production dependencies, and npm's install summary would land on the same
+      # stdout the JSON is read from, so the parse below would fail on the first
+      # line of npm output. The file is written by the packer itself and contains
+      # nothing else; stdout stays a human-readable log.
+      - name: Pack the .mcpb bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/pack-mcpb.mjs --json-out pack-mcpb.json
+          bundle="$(node -p "JSON.parse(require('node:fs').readFileSync('pack-mcpb.json','utf8')).path")"
+          echo "### MCPB bundle" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo '```'
+            cat "$bundle.sha256"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Independent verification: the checksum published to the Release must be
+      # the checksum of the bytes that are actually uploaded.
+      - name: Verify the published checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd build/mcpb
+          sha256sum -c ./*.mcpb.sha256
+
+      # The npm tarball gets provenance from `npm publish --provenance`; the
+      # .mcpb bundle is a second, independently distributed artifact and had
+      # nothing equivalent. A published checksum only says "these bytes are the
+      # bytes we listed" — it does not say which workflow, which commit or which
+      # repository produced them. This attestation does, and `gh attestation
+      # verify` lets any downloader check it without trusting the Release page.
+      - name: Attest the bundle's build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: build/mcpb/*.mcpb
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mcpb-bundle
+          path: |
+            build/mcpb/*.mcpb
+            build/mcpb/*.mcpb.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # 4. GitHub Release. The only job with `contents: write`, and it does nothing
+  #    but attach the already-verified bundle and its checksum.
+  # ---------------------------------------------------------------------------
+  github-release:
+    name: github release
+    needs: [gate, npm-publish, bundle]
+    if: needs.gate.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the Release and upload its assets
+      attestations: read # read back the bundle's provenance attestation
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: mcpb-bundle
+          path: assets
+
+      - name: Re-verify the checksum before upload
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd assets
+          sha256sum -c ./*.mcpb.sha256
+
+      # The same command a downloader runs. Doing it here means the rail proves
+      # the attestation is usable before the asset is public, rather than
+      # discovering it is unverifiable after someone tries.
+      - name: Verify the bundle's provenance attestation
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          for bundle in assets/*.mcpb; do
+            gh attestation verify "$bundle" --repo "$REPO"
+          done
+
+      - name: Create or update the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.gate.outputs.release-tag }}
+          PRERELEASE: ${{ needs.gate.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" assets/* --clobber
+          else
+            # `--prerelease=false` is passed explicitly rather than omitted: the
+            # flag is what decides whether this tag becomes the repository's
+            # "Latest" release, and that decision belongs in the gate's version
+            # parse, not in a default.
+            gh release create "$TAG" assets/* \
+              --title "$TAG" \
+              --generate-notes \
+              --verify-tag \
+              --prerelease="$PRERELEASE"
+          fi
+
+  # ---------------------------------------------------------------------------
+  # 5. MCP Registry. Runs after npm, because the registry verifies ownership
+  #    against the `mcpName` field of the published tarball.
+  # ---------------------------------------------------------------------------
+  mcp-registry:
+    name: mcp registry
+    needs: [gate, npm-publish]
+    if: needs.gate.outputs.registry == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # GitHub OIDC for `mcp-publisher login github-oidc`
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # A `resume` is dispatched on the default branch to get the current
+          # workflow file, but everything it builds and publishes must come from
+          # the release it is finishing. Empty for every other trigger, where it
+          # falls through to the ref the run was started on.
+          ref: ${{ inputs.tag || github.ref }}
+          persist-credentials: false
+
+      # `ref` above is a tag NAME, and every job resolves it independently. A tag
+      # can be force-moved, so a run whose gate passed on one commit can still
+      # build and publish another — the checks would have been applied to code
+      # that is not what ships, and for npm that is unrecoverable. Resolving the
+      # name a second time cannot detect that; comparing the commit can. This
+      # changes nothing about what is checked out, it only refuses to continue
+      # when it is not what was approved.
+      - name: Assert this is the commit the gate approved
+        shell: bash
+        env:
+          EXPECTED_COMMIT: ${{ needs.gate.outputs.commit }}
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD)"
+          if [ "$actual" != "$EXPECTED_COMMIT" ]; then
+            echo "::error::This job checked out $actual but the gate validated $EXPECTED_COMMIT - the ref moved mid-run, so nothing here has been gated. Do not re-run: re-cut the release from a stable tag."
+            exit 1
+          fi
+          echo "Running against the gated commit $actual."
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # Pinned and checksum-verified against a digest committed to THIS repo:
+      # this job holds an OIDC identity, so an unpinned "latest" download — or a
+      # digest fetched from the same place as the binary — would be the softest
+      # target in the rail.
+      - name: Install mcp-publisher
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="https://github.com/modelcontextprotocol/registry/releases/download/v${MCP_PUBLISHER_VERSION}"
+          asset='mcp-publisher_linux_amd64.tar.gz'
+          curl --fail --silent --show-error --location --retry 3 -o "$asset" "$base/$asset"
+
+          # 1. The gate that matters: the bytes must match the digest in git.
+          if ! echo "${MCP_PUBLISHER_SHA256}  ${asset}" | sha256sum -c -; then
+            echo "::error::mcp-publisher ${MCP_PUBLISHER_VERSION} does not match the SHA-256 pinned in release.yml."
+            echo "::error::Either the release was re-cut upstream or the download was tampered with. Do NOT relax this check: verify the artifact by hand and re-pin MCP_PUBLISHER_SHA256 in a reviewed commit."
+            exit 1
+          fi
+
+          # 2. Secondary, best-effort: the release's own checksums.txt should
+          #    agree. It proves nothing on its own (same host, same channel) but
+          #    a disagreement is a loud signal that upstream moved the asset.
+          if curl --fail --silent --show-error --location --retry 3 \
+               -o checksums.txt "$base/registry_${MCP_PUBLISHER_VERSION}_checksums.txt"; then
+            grep " ${asset}\$" checksums.txt | sha256sum -c - \
+              || echo "::warning::upstream checksums.txt disagrees with the asset; the pinned digest above already passed, continuing."
+          else
+            echo "::warning::could not fetch upstream checksums.txt; the pinned digest is authoritative anyway."
+          fi
+
+          tar -xzf "$asset" mcp-publisher
+          chmod +x mcp-publisher
+
+      # npm's CDN needs a moment before the registry can read the new tarball.
+      #
+      # "A moment" is generous for a scope whose first package this is: the 0.7.0
+      # publish returned success at 18:30:16Z and the packument only answered 200
+      # at 18:35:33Z — five minutes, where a version added to an existing package
+      # is usually visible in seconds. The window is 10 minutes because the cost
+      # of it being too short is asymmetric: npm is already published and cannot
+      # be published again, so a premature give-up costs a manual recovery run
+      # (`workflow_dispatch` with mode `resume`), while waiting longer on a
+      # release that was going to succeed anyway costs only runner minutes.
+      #
+      # A resume gets one attempt, not thirty: its whole premise is that the npm
+      # half already succeeded, so the tarball has been public since the run being
+      # recovered from. If it is not there, the premise is wrong and waiting ten
+      # minutes only delays the same answer — worse, it would be the last check
+      # standing between a wrong tag and a registry listing for a version nobody
+      # can install.
+      - name: Wait for the npm tarball to be visible
+        shell: bash
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+          RESUME: ${{ needs.gate.outputs.resume }}
+          TAG: ${{ needs.gate.outputs.release-tag }}
+        run: |
+          set -euo pipefail
+          name="$(node -p "JSON.parse(require('node:fs').readFileSync('package.json','utf8')).name")"
+          if [ "$RESUME" = "true" ]; then
+            if npm view "${name}@${VERSION}" version >/dev/null 2>&1; then
+              echo "${name}@${VERSION} is on npm, as a resume requires."
+              exit 0
+            fi
+            echo "::error::${name}@${VERSION} is not on npm, so ${TAG} was never published and there is nothing to resume. Cut the release normally by pushing the tag."
+            exit 1
+          fi
+          for attempt in $(seq 1 30); do
+            if npm view "${name}@${VERSION}" version >/dev/null 2>&1; then
+              echo "${name}@${VERSION} is visible on npm."
+              exit 0
+            fi
+            echo "Attempt ${attempt}: ${name}@${VERSION} not visible yet; retrying in 20s."
+            sleep 20
+          done
+          echo "::error::${name}@${VERSION} never became visible on npm; not registering a version the registry cannot verify."
+          exit 1
+
+      # The registry is append-only: a version may be listed exactly once, and a
+      # second publish of the same one is rejected with `cannot publish duplicate
+      # version` (HTTP 400). That is not a transient failure, so it is handled
+      # rather than retried — and what it means depends on why this run exists. On
+      # a resume the listing is the outcome being aimed at, so finding it already
+      # there is success. On a tag push it means the version was listed before this
+      # tag ran, which is a real problem worth stopping for.
+      - name: Publish server.json to the MCP Registry
+        shell: bash
+        env:
+          TAG: ${{ needs.gate.outputs.release-tag }}
+          VERSION: ${{ needs.gate.outputs.version }}
+          RESUME: ${{ needs.gate.outputs.resume }}
+        run: |
+          set -euo pipefail
+          ./mcp-publisher login github-oidc
+          for attempt in 1 2 3; do
+            if out="$(./mcp-publisher publish 2>&1)"; then
+              printf '%s\n' "$out"
+              exit 0
+            fi
+            printf '%s\n' "$out"
+            case "$out" in
+              *'duplicate version'*)
+                if [ "$RESUME" = "true" ]; then
+                  echo "::notice::version ${VERSION} is already listed on the MCP Registry - nothing left to resume."
+                  exit 0
+                fi
+                echo "::error::the MCP Registry already lists version ${VERSION}. Listings are immutable, so ${TAG} cannot claim it: publish a new version rather than trying to overwrite this one."
+                exit 1
+                ;;
+            esac
+            echo "Publish attempt ${attempt} failed; retrying in 30s."
+            sleep 30
+          done
+          echo "::error::mcp-publisher failed three times. npm is already published, so do not re-tag. Fix the cause on the default branch, then: gh workflow run release.yml --ref main -f mode=resume -f tag=$TAG"
+          exit 1
