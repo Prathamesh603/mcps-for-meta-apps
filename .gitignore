@@ -12,4 +12,9 @@ instagram-mcp/dist/
 *.mcpb
 *.tgz
 local/
+/.mcp.json
+/.cursor/mcp.json
+/.vscode/mcp.json
+/.codex/config.toml
+/claude_desktop_config.json
 .DS_Store

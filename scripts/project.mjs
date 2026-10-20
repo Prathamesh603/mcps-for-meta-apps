@@ -17,7 +17,7 @@ if (command === 'setup') {
 if (['setup', 'build', 'test', 'check'].includes(command)) {
   for (const repo of ['facebook-mcp', 'instagram-mcp']) npm(repo, ['run', 'build']);
 }
-if (['test', 'check'].includes(command)) run(['--test', 'test/security.test.mjs']);
+if (['test', 'check'].includes(command)) run(['--test', 'test/security.test.mjs', 'test/config.test.mjs']);
 if (['test', 'check'].includes(command)) run(['scripts/boundary-tests.mjs']);
 if (['audit', 'check'].includes(command)) {
   for (const repo of ['facebook-mcp', 'instagram-mcp']) npm(repo, ['audit', '--package-lock-only', '--ignore-scripts', '--audit-level=low']);

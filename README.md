@@ -1,18 +1,22 @@
-# Secure Meta MCP — hardened source distribution
+# mcps-for-meta-apps
+
+Hardened Facebook and Instagram MCP source distribution.
 
 Facebook Pages and Instagram professional-account MCP servers in one repository, with conservative defaults and security regression tests.
 
 This is an independent, modified distribution of Ivan Baev's MIT-licensed projects. It is not affiliated with Meta or endorsed by the upstream author. **“Hardened” describes specific controls, not a security certification.** Live company-account operations have not been validated by this project.
 
+Facebook features include Page reads and insights, with optional post, moderation and advertising tool packages. Instagram includes account/media reads, insights and discovery, with optional publishing and comment operations. Availability depends on the selected packages, account type and Meta permissions. See the retained [Facebook tool catalog](facebook-mcp/docs/analysis/06-tool-catalog.md) and [Instagram tool catalog](instagram-mcp/docs/tools.md); this repository's approval policy takes precedence over historical examples.
+
 ## Download and build
 
 Requirements: Git, npm 11, Node.js 22.22.0 or newer, and your own Meta app/account credentials. Start with a dedicated test Page/account. Instagram requires a Business/Creator account and the relevant Meta API permissions.
 
-After publishing this repository on GitHub, replace `YOUR_USERNAME` below with your GitHub name and use the actual repository name if you choose a different one:
+Download this repository from [Prathamesh603/mcps-for-meta-apps](https://github.com/Prathamesh603/mcps-for-meta-apps):
 
 ```sh
-git clone https://github.com/YOUR_USERNAME/secure-meta-mcp.git
-cd secure-meta-mcp
+git clone https://github.com/Prathamesh603/mcps-for-meta-apps.git
+cd mcps-for-meta-apps
 npm run setup
 npm test
 npm run audit
@@ -20,22 +24,37 @@ npm run audit
 
 `setup` installs each component's exact lockfile with lifecycle scripts disabled, then explicitly builds both servers. It does not log in, start a server, publish content, or request Meta credentials. A normal `npm install` in the parent does not install the child components; use `npm run setup`.
 
-Download ZIP is also supported: extract it, open a terminal in the extracted folder and run the same npm commands. No global installation, `npx` download, Python, Docker or nested Git submodules are required.
+[Download the main-branch ZIP](https://github.com/Prathamesh603/mcps-for-meta-apps/archive/refs/heads/main.zip) is also supported: extract it, open a terminal in the extracted folder and run the same npm commands. No global installation, `npx` download, Python, Docker or nested Git submodules are required.
 
-## Connect an MCP client
+## Connect Codex, Claude and other MCP clients
+
+Follow the [client setup guide](docs/CLIENT-SETUP.md) for prerequisites, credentials, verification and troubleshooting. Generate the correct format for your client:
+
+| Client | Generate configuration | Installation target |
+|---|---|---|
+| Codex local app / CLI / IDE | `npm run config -- --client=codex` | User `~/.codex/config.toml` |
+| Claude Code | `npm run config -- --client=claude-code` | Your project `.mcp.json` |
+| Claude Desktop | `npm run config -- --client=desktop` | Developer → Edit Config |
+| Cursor | `npm run config -- --client=cursor` | User `~/.cursor/mcp.json` |
+| VS Code / GitHub Copilot | `npm run config -- --client=vscode` | User-profile MCP configuration |
+| Other local stdio MCP clients | `npm run config` | Adapt to the client's own schema |
+
+These are configuration recipes, not a claim that every client/version has been tested. Read access needs compatible MCP tool support; writes additionally need human form elicitation. Browser/cloud-only clients cannot launch these local executables directly.
+
+The default command remains:
 
 ```sh
 npm run config
 ```
 
-This prints example configuration using your machine's absolute Node/server paths. It emits placeholders, never your environment secrets. Copy the two `mcpServers` entries into your client's supported MCP configuration. Replace account IDs and **inject credentials through your client's approved secret store or an environment-injecting secret manager**. Do not commit filled configuration JSON, paste tokens into chat, or put secrets on command-line arguments.
+This prints example configuration using your machine's absolute Node/server paths. It emits placeholders, never your environment secrets. Use the appropriate format above and merge entries into existing client configuration. When copying output from npm, omit npm's banner lines; the direct `node scripts/print-config.mjs --client=CLIENT` command emits only configuration. Replace account IDs and **inject credentials through your client's approved secret store or an environment-injecting secret manager**. Do not commit filled configuration JSON, paste tokens into chat, or put secrets on command-line arguments.
 
 If you only need one service, configure only that entry. The commands run local compiled files from this repository, not the similarly named upstream npm packages.
 
 | Service | Local executable | Default tool access |
 |---|---|---|
-| Facebook | `node /absolute/path/secure-meta-mcp/facebook-mcp/bin/facebook-mcp.mjs` | Account diagnostics, reading and insights |
-| Instagram | `node /absolute/path/secure-meta-mcp/instagram-mcp/bin/instagram-mcp-ai.cjs` | Read-only reader profile |
+| Facebook | `node /absolute/path/mcps-for-meta-apps/facebook-mcp/bin/facebook-mcp.mjs` | Account diagnostics, reading and insights |
+| Instagram | `node /absolute/path/mcps-for-meta-apps/instagram-mcp/bin/instagram-mcp-ai.cjs` | Read-only reader profile |
 
 The generator uses stdio. HTTP is optional, loopback-only and authenticated. Instagram HTTP requires a separate `IG_HTTP_TOKEN` of at least 32 characters; Facebook also requires its separate HTTP bearer credential. Neither is your Meta access token. Do not expose a raw MCP HTTP listener to the public internet.
 
@@ -86,15 +105,16 @@ No live Meta permission, account-publishing or advertising-spend certification i
 
 See [VALIDATION.md](VALIDATION.md) for the dated test counts, audit results and the Windows symlink-test limitation.
 
-## Publish your copy to GitHub
+## Repository and updates
 
-This source folder is prepared as a Git repository. Create an **empty** GitHub repository, then run these commands from this folder, replacing the placeholders:
+Source: [Prathamesh603/mcps-for-meta-apps](https://github.com/Prathamesh603/mcps-for-meta-apps). Installers should clone this repository and build the locked local sources; the similarly named upstream npm packages do not contain these hardening changes.
+
+To update a clean clone, review the incoming changes and then run:
 
 ```sh
-git remote add origin https://github.com/YOUR_USERNAME/secure-meta-mcp.git
-git push -u origin main
+git pull --ff-only origin main
+npm run setup
+npm run check
 ```
 
-If starting from a downloaded source ZIP rather than this prepared Git folder, first run `git init -b main`, `git add .`, and `git commit -m "feat: add hardened Meta MCP distribution"`. Set your Git author identity if Git requests it. Then add your remote and push. Inspect staged files before publishing. `.gitignore` excludes dependencies, builds, local config, token files and audit logs; it cannot detect every possible secret.
-
-Keep the upstream MIT license files and [NOTICE](NOTICE). Enable GitHub secret scanning/private vulnerability reporting if available for your repository. This project has no configured remote and is not automatically published anywhere.
+Restart your MCP client after rebuilding. Keep personal changes in a separate branch. Preserve the upstream MIT license files and [NOTICE](NOTICE) when redistributing. See [UPSTREAM.md](UPSTREAM.md) for provenance and maintenance requirements.
